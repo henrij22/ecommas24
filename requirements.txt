@@ -1,0 +1,5 @@
+scikit-build
+pyvista
+pandas
+tabulate
+geomdl
