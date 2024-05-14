@@ -2,9 +2,9 @@
 #
 # SPDX-License-Identifier: MIT
 
-import os
-os.environ["DUNE_LOG_LEVEL"] = "debug"
-os.environ["DUNE_SAVE_BUILD"] = "console"
+# import os
+# os.environ["DUNE_LOG_LEVEL"] = "debug"
+# os.environ["DUNE_SAVE_BUILD"] = "console"
 
 from pathlib import Path
 from time import process_time
@@ -40,20 +40,20 @@ NU = 0.0
 def run_simulation(deg: int, refine: int, testing=False):
     reader = {
         "reader": readeriga.json,
-        "file_path": "input/plate_holes.ibra",
+        "file_path": "input/quarter_plate.ibra",
         "trim": True,
         "degree_elevate": (deg - 1, deg - 1),
     }
 
-    gridView = IGAGrid(reader, dimgrid=2, dimworld=3, gridType=IGAGridType.Default)
-    gridView.hierarchicalGrid.globalRefine(refine)
+    gridView = IGAGrid(reader, dimgrid=2, dimworld=2, gridType=IGAGridType.Default)
+    gridView.hierarchicalGrid.globalRefine(1)
 
-    basis = globalBasis(gridView, Power(Nurbs(), 3))
+    basis = globalBasis(gridView, Power(Nurbs(), 2))
     flatBasis = basis.flat()
 
     ## Define Load
     def vL(x, lambdaVal):
-        return np.array([0, 0, 2 * THICKNESS**3 * lambdaVal])
+        return np.array([0.0, 1.0])
 
     ## Define Dirichlet Boundary Conditions
     dirichletValues = iks.dirichletValues(flatBasis)
@@ -180,8 +180,8 @@ if __name__ == "__main__":
     # refine: 3 to 6
 
     data = []
-    for i in range(2, 5):
-        for j in range(3, 7):
+    for i in range(2, 3):
+        for j in range(3, 4):
             t1 = process_time()
             max_d, iterations, dofs = run_simulation(deg=i, refine=j)
             data.append((i, j, max_d, iterations, dofs, process_time() - t1))
