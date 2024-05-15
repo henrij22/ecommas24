@@ -2,9 +2,12 @@
 #
 # SPDX-License-Identifier: MIT
 
-# import os
-# os.environ["DUNE_LOG_LEVEL"] = "debug"
-# os.environ["DUNE_SAVE_BUILD"] = "console"
+import os
+
+os.environ["DUNE_LOG_LEVEL"] = "debug"
+os.environ["DUNE_SAVE_BUILD"] = "console"
+os.environ["DUNE_CMAKE_FLAGS"] = "-CMAKE_BUILD_TYPE=debug"
+
 
 from pathlib import Path
 from time import process_time
@@ -37,22 +40,21 @@ THICKNESS = 0.1  # 10 cm
 E_MOD = 1000
 NU = 0.0
 
-analyticalSolution = AnalyticalSolution(
-    E=E_MOD, nu=NU, Tx=1, R=1, offset=np.array([0, 0])
-)
-
 
 def run_simulation(deg: int, refine: int, testing=False):
     reader = {
         "reader": readeriga.json,
         "file_path": "input/quarter_plate.ibra",
         "trim": True,
-        "degree_elevate": (deg - 1, deg - 1)
+        "degree_elevate": (deg - 1, deg - 1),
+        "post_knot_refinement": (refine, refine),
     }
 
     gridView = IGAGrid(reader, dimgrid=2, dimworld=2, gridType=IGAGridType.Default)
-    # for _ in range(refine):
-    gridView.hierarchicalGrid.globalRefine(1)
+
+    analyticalSolution = AnalyticalSolution(
+        E=E_MOD, nu=NU, Tx=1, R=1, offset=np.array([0, 0])
+    )
 
     dune.iga.registerTrimmerPreferences(targetAccuracy=0.001)
 
@@ -87,7 +89,10 @@ def run_simulation(deg: int, refine: int, testing=False):
     dirichletValues.fixDOFs(fixDofFunction)
 
     ## Create Elements
-    linearElastic = ikarus.finite_elements.linearElastic(youngs_modulus=E_MOD, nu=NU)
+    svk = iks.materials.StVenantKirchhoff(E=E_MOD, nu=NU)
+
+    svkPS = svk.asPlaneStress()
+    linearElastic = ikarus.finite_elements.nonLinearElastic(svkPS)
 
     fes = []
     for e in gridView.elements:
@@ -101,30 +106,30 @@ def run_simulation(deg: int, refine: int, testing=False):
     )
 
     lambdaLoad = iks.ValueWrapper(LAMBDA_LOAD)
-
-    d = np.zeros(len(flatBasis))
+    d = np.zeros(flatBasis.dimension)
 
     req = ikarus.FERequirements()
     req.addAffordance(iks.ScalarAffordances.mechanicalPotentialEnergy)
     req.insertParameter(iks.FEParameter.loadfactor, lambdaLoad)
     req.insertGlobalSolution(iks.FESolutions.displacement, d)
 
-    K = assembler.getMatrix(req)
+    # K = assembler.getMatrix(req)
     F = assembler.getVector(req)
 
-    d = sp.sparse.linalg.spsolve(K, F)
-   
-    req.insertGlobalSolution(iks.FESolutions.displacement, d)
+    # d = sp.sparse.linalg.spsolve(K, F)
+    # d = sp.linalg.solve(K, F)
 
-    dispFunc = flatBasis.asFunction(d)
-    stressFunc = gridView.function(
-        lambda e, x: fes[indexSet.index(e)].calculateAt(req, x, "linearStress")[:]
-    )
+    # # req.insertGlobalSolution(iks.FESolutions.displacement, d)
 
-    vtkWriter = gridView.trimmedVtkWriter(0)
-    vtkWriter.addPointData(dispFunc, name="displacement")
-    vtkWriter.addPointData(stressFunc, name="stress")
-    vtkWriter.write(name=f"{output_folder}/result_d{deg}_r{refine}")
+    # dispFunc = flatBasis.asFunction(d)
+    # # stressFunc = gridView.function(
+    # #     lambda e, x: fes[indexSet.index(e)].calculateAt(req, x, "linearStress")[:]
+    # # )
+
+    # vtkWriter = gridView.trimmedVtkWriter(0)
+    # vtkWriter.addPointData(dispFunc, name="displacement")
+    # #vtkWriter.addPointData(stressFunc, name="stress")
+    # vtkWriter.write(name=f"{output_folder}/result_d{deg}_r{refine}")
 
     # # Do some postprocessing with pyVista
     # mesh = pv.UnstructuredGrid(f"{output_folder}/result_d{deg}_r{refine}.vtu")
@@ -135,7 +140,7 @@ def run_simulation(deg: int, refine: int, testing=False):
     # max_d = np.max(disp_z)
     # print(f"Max d: {max_d}")
 
-    return 0, 0, 0
+    return 0, 0, flatBasis.dimension
 
 
 def plot(filename):
@@ -159,8 +164,8 @@ if __name__ == "__main__":
     # refine: 3 to 6
 
     data = []
-    for i in range(2, 3):
-        for j in range(3, 4):
+    for i in range(1, 2):
+        for j in range(2, 6):
             t1 = process_time()
             max_d, iterations, dofs = run_simulation(deg=i, refine=j)
             data.append((i, j, max_d, iterations, dofs, process_time() - t1))
