@@ -6,7 +6,7 @@ import os
 
 # os.environ["DUNE_LOG_LEVEL"] = "debug"
 # os.environ["DUNE_SAVE_BUILD"] = "console"
-# os.environ["DUNE_CMAKE_FLAGS"] = "-CMAKE_BUILD_TYPE=debug"
+os.environ["DUNE_CMAKE_FLAGS"] = "-CMAKE_BUILD_TYPE=Debug"
 
 
 from pathlib import Path
@@ -27,9 +27,9 @@ import dune.iga
 from dune.iga import IGAGrid, IGAGridType
 from dune.iga import reader as readeriga
 
-import dune.functions
+
 from dune.iga.basis import Nurbs, Power
-from fix_dirichlet import fixDofFunction
+from fix_dirichlet import fixDofFunction2
 from nurbs_basis import globalBasis
 from tabulate import tabulate
 
@@ -44,61 +44,35 @@ NU = 0.0
 def run_simulation(deg: int, refine: int, testing=False):
     reader = {
         "reader": readeriga.json,
-        "file_path": "input/quarter_plate.ibra",
+        "file_path": "input/surface-hole.ibra",
         "trim": True,
         "degree_elevate": (deg - 1, deg - 1),
         "post_knot_refinement": (refine, refine),
     }
 
-    gridView = IGAGrid(reader, dimgrid=2, dimworld=2, gridType=IGAGridType.Default)
+    gridView = IGAGrid(reader, dimgrid=2, dimworld=3, gridType=IGAGridType.Default)
 
-    analyticalSolution = AnalyticalSolution(
-        E=E_MOD, nu=NU, Tx=1, R=1, offset=np.array([0, 0])
-    )
+    basis = globalBasis(gridView, Power(Nurbs(), 3))
+    flatBasis = basis.flat()
 
     dune.iga.registerTrimmerPreferences(targetAccuracy=0.001)
 
-    basis = globalBasis(gridView, Power(Nurbs(), 2))
-
-
-    flatBasis = basis.flat()
-
-    ## Define Load
-    def neumannLoad(x, lambdaVal):
-        stresses = analyticalSolution.stressSolution(x)
-
-        # left side
-        if x[0] > 4 - 1e-8:
-            return np.array([stresses[0], stresses[2]])
-        elif x[1] > 4 - 1e-8:
-            return np.array([stresses[2], stresses[1]])
-        return np.array([0.0, 0.0])
-
-    neumannVertices = np.zeros(gridView.size(2), dtype=bool)
-
-    def loadPredicate(x):
-        return abs(x[0]) > 4 - 1e-8 or abs(x[1]) > 4 - 1e-8
-
-    indexSet = gridView.indexSet
-    for v in gridView.vertices:
-        neumannVertices[indexSet.index(v)] = loadPredicate(v.geometry.center)
-
-    boundaryPatch = dune.iga.boundaryPatch(gridView, neumannVertices)
-    nBLoad = iks.finite_elements.neumannBoundaryLoad(boundaryPatch, neumannLoad)
+     ## Define Load
+    def vL(x, lambdaVal):
+        return np.array([0, 0, 2 * THICKNESS**3 * lambdaVal])
 
     ## Define Dirichlet Boundary Conditions
     dirichletValues = iks.dirichletValues(flatBasis)
-    dirichletValues.fixDOFs(fixDofFunction)
+    dirichletValues.fixDOFs(fixDofFunction2)
 
     ## Create Elements
-    svk = iks.materials.StVenantKirchhoff(E=E_MOD, nu=NU)
-
-    svkPS = svk.asPlaneStress()
-    linearElastic = ikarus.finite_elements.nonLinearElastic(svkPS)
-
+    vLoad = iks.finite_elements.volumeLoad3D(vL)
+    klShell = iks.finite_elements.kirchhoffLoveShell(
+        youngs_modulus=E_MOD, nu=NU, thickness=THICKNESS
+    )
     fes = []
     for e in gridView.elements:
-        fes.append(iks.finite_elements.makeFE(basis, linearElastic, nBLoad))
+        fes.append(iks.finite_elements.makeFE(basis, klShell, vLoad))
         fes[-1].bind(e)
 
     assembler = iks.assembler.sparseFlatAssembler(fes, dirichletValues)
@@ -115,7 +89,7 @@ def run_simulation(deg: int, refine: int, testing=False):
     req.insertParameter(iks.FEParameter.loadfactor, lambdaLoad)
     req.insertGlobalSolution(iks.FESolutions.displacement, d)
 
-    K = assembler.getMatrix(req)
+    #K = assembler.getMatrix(req)
     F = assembler.getVector(req)
 
     # d = sp.sparse.linalg.spsolve(K, F)
@@ -166,8 +140,8 @@ if __name__ == "__main__":
     # refine: 3 to 6
 
     data = []
-    for i in range(1, 2):
-        for j in range(4, 5):
+    for i in range(2, 4):
+        for j in range(3, 6):
             t1 = process_time()
             max_d, iterations, dofs = run_simulation(deg=i, refine=j)
             data.append((i, j, max_d, iterations, dofs, process_time() - t1))
