@@ -14,10 +14,16 @@ fixFunction = """
 #include <dune/python/pybind11/eigen.h>
 void fixFunction(auto& basis_, auto dirichletFlags_) {
   auto dirichletFlags = dirichletFlags_.template cast<Eigen::Ref<Eigen::VectorX<bool>>>();
-  Dune::Functions::forEachUntrimmedBoundaryDOF(basis_,
-                                                 [&](auto&& localIndex, auto&& localView, auto&& intersection) {
-                                                   dirichletFlags[localView.index(localIndex)] = true;
-                                                 });
+  Dune::Functions::forEachUntrimmedBoundaryDOF(
+        Dune::Functions::subspaceBasis(basis_, 1), [&](auto &&localIndex, auto &&localView, auto &&intersection) {
+          if (std::fabs(intersection.geometry().center()[1]) < 1e-8)
+            dirichletFlags[localView.index(localIndex)] = true;
+        });
+    Dune::Functions::forEachUntrimmedBoundaryDOF(
+        Dune::Functions::subspaceBasis(basis_, 0), [&](auto &&localIndex, auto &&localView, auto &&intersection) {
+          if (std::fabs(intersection.geometry().center()[0]) < 1e-8)
+            dirichletFlags[localView.index(localIndex)] = true;
+        });
 }
 """
 

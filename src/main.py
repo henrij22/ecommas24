@@ -13,12 +13,14 @@ import ikarus as iks
 import ikarus.assembler
 import ikarus.dirichlet_values
 import ikarus.finite_elements
+import ikarus.utils
 import numpy as np
 import pandas as pd
 import pyvista as pv
 import scipy as sp
 
 
+import dune.iga
 from dune.iga import IGAGrid, IGAGridType
 from dune.iga import reader as readeriga
 
@@ -28,13 +30,16 @@ from fix_dirichlet import fixDofFunction
 from nurbs_basis import globalBasis
 from tabulate import tabulate
 
+from analytical import AnalyticalSolution
 
 LAMBDA_LOAD = 1.0
 THICKNESS = 0.1  # 10 cm
 E_MOD = 1000
 NU = 0.0
 
-
+analyticalSolution = AnalyticalSolution(
+    E=E_MOD, nu=NU, Tx=1, R=1, offset=np.array([0, 0])
+)
 
 
 def run_simulation(deg: int, refine: int, testing=False):
@@ -42,31 +47,51 @@ def run_simulation(deg: int, refine: int, testing=False):
         "reader": readeriga.json,
         "file_path": "input/quarter_plate.ibra",
         "trim": True,
-        "degree_elevate": (deg - 1, deg - 1),
+        "degree_elevate": (deg - 1, deg - 1)
     }
 
     gridView = IGAGrid(reader, dimgrid=2, dimworld=2, gridType=IGAGridType.Default)
+    # for _ in range(refine):
     gridView.hierarchicalGrid.globalRefine(1)
+
+    dune.iga.registerTrimmerPreferences(targetAccuracy=0.001)
 
     basis = globalBasis(gridView, Power(Nurbs(), 2))
     flatBasis = basis.flat()
 
     ## Define Load
-    def vL(x, lambdaVal):
-        return np.array([0.0, 1.0])
+    def neumannLoad(x, lambdaVal):
+        stresses = analyticalSolution.stressSolution(x)
+
+        # left side
+        if x[0] > 4 - 1e-8:
+            return np.array([stresses[0], stresses[2]])
+        elif x[1] > 4 - 1e-8:
+            return np.array([stresses[2], stresses[1]])
+        return np.array([0.0, 0.0])
+
+    neumannVertices = np.zeros(gridView.size(2), dtype=bool)
+
+    def loadPredicate(x):
+        return abs(x[0]) > 4 - 1e-8 or abs(x[1]) > 4 - 1e-8
+
+    indexSet = gridView.indexSet
+    for v in gridView.vertices:
+        neumannVertices[indexSet.index(v)] = loadPredicate(v.geometry.center)
+
+    boundaryPatch = dune.iga.boundaryPatch(gridView, neumannVertices)
+    nBLoad = iks.finite_elements.neumannBoundaryLoad(boundaryPatch, neumannLoad)
 
     ## Define Dirichlet Boundary Conditions
     dirichletValues = iks.dirichletValues(flatBasis)
     dirichletValues.fixDOFs(fixDofFunction)
 
     ## Create Elements
-    vLoad = iks.finite_elements.volumeLoad3D(vL)
-    klShell = iks.finite_elements.kirchhoffLoveShell(
-        youngs_modulus=E_MOD, nu=NU, thickness=THICKNESS
-    )
+    linearElastic = ikarus.finite_elements.linearElastic(youngs_modulus=E_MOD, nu=NU)
+
     fes = []
     for e in gridView.elements:
-        fes.append(iks.finite_elements.makeFE(basis, klShell, vLoad))
+        fes.append(iks.finite_elements.makeFE(basis, linearElastic, nBLoad))
         fes[-1].bind(e)
 
     assembler = iks.assembler.sparseFlatAssembler(fes, dirichletValues)
@@ -75,88 +100,42 @@ def run_simulation(deg: int, refine: int, testing=False):
         f"Size of full System: {flatBasis.dimension}, size of red. System: {assembler.reducedSize()}"
     )
 
-    ## Solve non-linear Kirchhol-Love-Shell problem
-    def assemble(dRed_):
-        req = ikarus.FERequirements()
-        req.addAffordance(iks.ScalarAffordances.mechanicalPotentialEnergy)
-        lambdaLoad = iks.ValueWrapper(LAMBDA_LOAD)
-        req.insertParameter(iks.FEParameter.loadfactor, lambdaLoad)
-        dFull = assembler.createFullVector(dRed_)
-        req.insertGlobalSolution(iks.FESolutions.displacement, dFull)
-        r = assembler.getReducedVector(req)
-        k = assembler.getReducedMatrix(req)
-        return [r, k]
-
     lambdaLoad = iks.ValueWrapper(LAMBDA_LOAD)
 
-    def energy(dRedInput):
-        reqL = ikarus.FERequirements()
-        reqL.addAffordance(iks.ScalarAffordances.mechanicalPotentialEnergy)
-        reqL.insertParameter(iks.FEParameter.loadfactor, lambdaLoad)
+    d = np.zeros(len(flatBasis))
 
-        dBig = assembler.createFullVector(dRedInput)
-        reqL.insertGlobalSolution(iks.FESolutions.displacement, dBig)
-        return assembler.getScalar(reqL)
+    req = ikarus.FERequirements()
+    req.addAffordance(iks.ScalarAffordances.mechanicalPotentialEnergy)
+    req.insertParameter(iks.FEParameter.loadfactor, lambdaLoad)
+    req.insertGlobalSolution(iks.FESolutions.displacement, d)
 
-    def gradient(dRedInput):
-        reqL = ikarus.FERequirements()
-        reqL.addAffordance(iks.VectorAffordances.forces)
-        reqL.insertParameter(iks.FEParameter.loadfactor, lambdaLoad)
+    K = assembler.getMatrix(req)
+    F = assembler.getVector(req)
 
-        dBig = assembler.createFullVector(dRedInput)
-        reqL.insertGlobalSolution(iks.FESolutions.displacement, dBig)
-        return assembler.getReducedVector(reqL)
+    d = sp.sparse.linalg.spsolve(K, F)
+   
+    req.insertGlobalSolution(iks.FESolutions.displacement, d)
 
-    def hess(dRedInput):
-        reqL = ikarus.FERequirements()
-        reqL.addAffordance(iks.MatrixAffordances.stiffness)
-        reqL.insertParameter(iks.FEParameter.loadfactor, lambdaLoad)
-
-        dBig = assembler.createFullVector(dRedInput)
-        reqL.insertGlobalSolution(iks.FESolutions.displacement, dBig)
-        return assembler.getReducedMatrix(reqL).todense()
-
-    d = np.zeros(assembler.reducedSize())
-    res = sp.optimize.minimize(
-        energy,
-        method="trust-exact",
-        x0=d,
-        jac=gradient,
-        hess=hess,
-        tol=1e-8,
-        options={"maxiter": 50},
+    dispFunc = flatBasis.asFunction(d)
+    stressFunc = gridView.function(
+        lambda e, x: fes[indexSet.index(e)].calculateAt(req, x, "linearStress")[:]
     )
-    d = res.x
-    iterations = res.nit
-    if res.success:
-        print(
-            f"Solution found after {iterations} iterations, residual norm: {sp.linalg.norm(res.jac)}"
-        )
-    else:
-        print(
-            f"Solution not found after {iterations} iterations, residual norm: {sp.linalg.norm(res.jac)}"
-        )
 
-    if testing:
-        return 0, 0, 0
-
-    dFull = assembler.createFullVector(d)
-    dispFunc = flatBasis.asFunction(dFull)
-
-    vtkWriter = gridView.trimmedVtkWriter()
+    vtkWriter = gridView.trimmedVtkWriter(0)
     vtkWriter.addPointData(dispFunc, name="displacement")
+    vtkWriter.addPointData(stressFunc, name="stress")
     vtkWriter.write(name=f"{output_folder}/result_d{deg}_r{refine}")
 
-    # Do some postprocessing with pyVista
-    mesh = pv.UnstructuredGrid(f"{output_folder}/result_d{deg}_r{refine}.vtu")
+    # # Do some postprocessing with pyVista
+    # mesh = pv.UnstructuredGrid(f"{output_folder}/result_d{deg}_r{refine}.vtu")
 
-    # nodal displacements in z-Direction
-    disp_z = mesh["displacement"][:, 2]
+    # # nodal displacements in z-Direction
+    # disp_z = mesh["displacement"][:, 1]
 
-    max_d = np.max(disp_z)
-    print(f"Max d: {max_d}")
+    # max_d = np.max(disp_z)
+    # print(f"Max d: {max_d}")
 
-    return max_d, iterations, assembler.reducedSize()
+    return 0, 0, 0
 
 
 def plot(filename):
